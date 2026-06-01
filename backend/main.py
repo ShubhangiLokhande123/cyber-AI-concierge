@@ -282,5 +282,8 @@ def _openai_response(content: str) -> dict:
 
 
 # ── Mangum handler for Vercel / AWS Lambda serverless ─────────────────────
-from mangum import Mangum  # noqa: E402
-handler = Mangum(app, lifespan="off")
+try:
+    from mangum import Mangum  # noqa: E402
+    handler = Mangum(app, lifespan="off")
+except ImportError:
+    handler = None  # Not running in serverless environment
