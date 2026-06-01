@@ -55,25 +55,38 @@ CONVERSATIONAL_CONTEXT = (
 )
 
 
-# ── Agent (module-level singleton) ─────────────────────────────────────────
-agent_executor = None
+# ── Agent (lazy singleton – works in server and serverless alike) ─────────
+_agent_executor = None
+
+
+def _get_agent():
+    """Return the agent executor, building it on first call (serverless-safe)."""
+    global _agent_executor  # noqa: PLW0603
+    if _agent_executor is None:
+        log.info("Building LangChain agent…")
+        _agent_executor = build_agent()
+        log.info("Agent ready.")
+    return _agent_executor
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global agent_executor  # noqa: PLW0603
-    log.info("Building LangChain agent…")
-    agent_executor = build_agent()
-    log.info("Agent ready.")
+    _get_agent()  # Pre-warm in traditional server mode
     yield
 
 
 # ── App ────────────────────────────────────────────────────────────────────
 app = FastAPI(title="CyberGuard AI Concierge", version="1.0.0", lifespan=lifespan)
 
+# Include Vercel deployment URL automatically if present
+_vercel_url = os.getenv("VERCEL_URL", "")
+_allowed_origins = [FRONTEND_URL, "http://localhost:3000"]
+if _vercel_url:
+    _allowed_origins.append(f"https://{_vercel_url}")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL, "http://localhost:3000"],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -157,7 +170,7 @@ async def send_message(body: SendMessageRequest):
     last_exc: Exception | None = None
     for attempt in range(3):
         try:
-            result = agent_executor.invoke({"input": text, "chat_history": []})
+            result = _get_agent().invoke({"input": text, "chat_history": []})
             reply: str = result.get("output", "I could not generate a response. Please try again.")
             log.info("Text reply (%d chars): %s…", len(reply), reply[:80])
             return {"response": reply, "conversation_id": body.conversation_id}
@@ -229,7 +242,7 @@ async def tavus_webhook(request: Request):
 
     # ── Run agent ──────────────────────────────────────────────────────────
     try:
-        result = agent_executor.invoke(
+        result = _get_agent().invoke(
             {"input": user_input, "chat_history": history}
         )
         reply: str = result.get("output", "I could not generate a response. Please try again.")
@@ -262,3 +275,8 @@ def _openai_response(content: str) -> dict:
         "response": content,
         "message": content,
     }
+
+
+# ── Mangum handler for Vercel / AWS Lambda serverless ─────────────────────
+from mangum import Mangum  # noqa: E402
+handler = Mangum(app, lifespan="off")

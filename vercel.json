@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "frontend/package.json",
+      "use": "@vercel/next"
+    },
+    {
+      "src": "backend/main.py",
+      "use": "@vercel/python",
+      "config": {
+        "maxLambdaSize": "100mb"
+      }
+    }
+  ],
+  "routes": [
+    { "src": "/health$", "dest": "backend/main.py" },
+    { "src": "/api/(.*)", "dest": "backend/main.py" },
+    { "src": "/webhook/(.*)", "dest": "backend/main.py" }
+  ]
+}
