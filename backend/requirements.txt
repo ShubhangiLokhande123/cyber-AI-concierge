@@ -8,5 +8,5 @@ langchain-core>=0.4.0
 langchain-classic>=1.0.0
 langchain-groq
 langchain-community>=0.4.0
-requests==2.32.3
+requests>=2.32.5,<3.0.0
 mangum>=0.17.0
