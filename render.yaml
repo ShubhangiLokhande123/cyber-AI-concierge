@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: cyberguard-backend
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: TAVUS_API_KEY
+        sync: false
+      - key: TAVUS_REPLICA_ID
+        sync: false
+      - key: TAVUS_PERSONA_ID
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: ELEVENLABS_VOICE_ID
+        sync: false
+      - key: FRONTEND_URL
+        value: https://shubhangilokhande123.github.io
+      - key: WEBHOOK_BASE_URL
+        sync: false

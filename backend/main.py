@@ -80,7 +80,11 @@ app = FastAPI(title="CyberGuard AI Concierge", version="1.0.0", lifespan=lifespa
 
 # Include Vercel deployment URL automatically if present
 _vercel_url = os.getenv("VERCEL_URL", "")
-_allowed_origins = [FRONTEND_URL, "http://localhost:3000"]
+_allowed_origins = [
+    FRONTEND_URL,
+    "http://localhost:3000",
+    "https://shubhangilokhande123.github.io",
+]
 if _vercel_url:
     _allowed_origins.append(f"https://{_vercel_url}")
 
