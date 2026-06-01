@@ -21,8 +21,10 @@ export function useTavusRoom() {
   const callRef = useRef<DailyCallObject | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
+  const localAnalyserRef = useRef<AnalyserNode | null>(null);
+  const audioElementsRef = useRef<HTMLAudioElement[]>([]);
   const videoElRef = useRef<HTMLVideoElement | null>(null);
-  const transcriptBufferRef = useRef<string>("");
+  const agentStatusRef = useRef<AgentStatus>("idle"); // track agent status separate from user speaking
 
   const [status, setStatus] = useState<AgentStatus>("idle");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -31,6 +33,11 @@ export function useTavusRoom() {
   const [error, setError] = useState<string | null>(null);
   const [micEnabled, setMicEnabled] = useState<boolean>(false);
   const [micAvailable, setMicAvailable] = useState<boolean>(false);
+
+  const setStatusTracked = useCallback((s: AgentStatus) => {
+    agentStatusRef.current = s;
+    setStatus(s);
+  }, []);
 
   const addMessage = useCallback((role: "agent" | "user", content: string) => {
     setMessages((prev) => [
@@ -44,7 +51,7 @@ export function useTavusRoom() {
     ]);
   }, []);
 
-  const setupAudioAnalyser = useCallback((stream: MediaStream) => {
+  const setupAudioAnalyser = useCallback((stream: MediaStream, isLocal = false) => {
     try {
       if (!audioCtxRef.current || audioCtxRef.current.state === "closed") {
         audioCtxRef.current = new AudioContext();
@@ -56,8 +63,18 @@ export function useTavusRoom() {
       const source = audioCtxRef.current.createMediaStreamSource(stream);
       source.connect(analyser);
 
-      analyserRef.current = analyser;
-      setAudioAnalyser(analyser);
+      if (isLocal) {
+        localAnalyserRef.current = analyser;
+        // For local mic, use this analyser so the visualizer shows user speaking
+        analyserRef.current = analyser;
+        setAudioAnalyser(analyser);
+      } else {
+        analyserRef.current = analyser;
+        // Only switch to agent analyser if local isn't active
+        if (!localAnalyserRef.current) {
+          setAudioAnalyser(analyser);
+        }
+      }
     } catch {
       // AudioContext may be blocked before user gesture; silently ignore
     }
@@ -65,7 +82,7 @@ export function useTavusRoom() {
 
   const join = useCallback(
     async (conversationUrl: string, convId: string) => {
-      setStatus("connecting");
+      setStatusTracked("connecting");
       setConversationId(convId);
       setError(null);
       setMicEnabled(false);
@@ -107,8 +124,17 @@ export function useTavusRoom() {
 
         // ── Track started ──────────────────────────────────────────────
         call.on("track-started", (event) => {
-          if (!event.participant || event.participant.local) return;
+          if (!event.participant) return;
           const { track, participant } = event;
+
+          // Local mic track → set up user audio analyser
+          if (participant.local && track.kind === "audio") {
+            const stream = new MediaStream([track]);
+            setupAudioAnalyser(stream, true);
+            return;
+          }
+
+          if (participant.local) return;
 
           if (track.kind === "video") {
             const videoEl = videoElRef.current;
@@ -123,31 +149,46 @@ export function useTavusRoom() {
 
           if (track.kind === "audio") {
             const stream = new MediaStream([track]);
-            setupAudioAnalyser(stream);
-            // Also play audio through a hidden element
+            setupAudioAnalyser(stream, false);
+            // Play agent audio through a hidden element
             const audioEl = document.createElement("audio");
             audioEl.srcObject = stream;
             audioEl.autoplay = true;
             audioEl.style.display = "none";
             document.body.appendChild(audioEl);
+            audioElementsRef.current = [...audioElementsRef.current, audioEl];
+          }
+        });
+
+        // ── Active speaker detection ───────────────────────────────────
+        call.on("active-speaker-change", (event) => {
+          const activePeerId = (event as unknown as { activeSpeaker?: { peerId?: string } })
+            ?.activeSpeaker?.peerId;
+          if (!activePeerId) return;
+
+          const participants = call.participants();
+          const isLocalSpeaking = participants?.local?.session_id === activePeerId;
+
+          if (isLocalSpeaking && agentStatusRef.current === "listening") {
+            setStatus("listening"); // keep listening while user speaks
           }
         });
 
         // ── Participant events ─────────────────────────────────────────
         call.on("participant-joined", () => {
-          setStatus("listening");
+          setStatusTracked("listening");
         });
 
         call.on("participant-left", () => {
-          setStatus("ended");
+          setStatusTracked("ended");
         });
 
-        // ── Transcription (Daily transcription feature) ────────────────
+        // ── App messages (Tavus state events) ─────────────────────────
         call.on("app-message", (event: { data: Record<string, unknown>; fromId: string }) => {
           const data = event.data;
           if (!data) return;
 
-          // Tavus-specific transcript events
+          // Tavus transcript events
           if (data.type === "transcript" || data.type === "conversation.transcript") {
             const role = (data.role as string) === "user" ? "user" : "agent";
             const text = (data.text ?? data.content ?? "") as string;
@@ -155,12 +196,24 @@ export function useTavusRoom() {
           }
 
           // Tavus speaking/listening state
-          if (data.type === "agent-speaking") setStatus("speaking");
-          if (data.type === "agent-listening") setStatus("listening");
-          if (data.type === "agent-thinking") setStatus("thinking");
+          if (data.type === "agent-speaking") {
+            setStatusTracked("speaking");
+            // Switch visualiser to agent audio when agent speaks
+            if (analyserRef.current && analyserRef.current !== localAnalyserRef.current) {
+              setAudioAnalyser(analyserRef.current);
+            }
+          }
+          if (data.type === "agent-listening") {
+            setStatusTracked("listening");
+            // Switch visualiser back to local mic when agent is listening
+            if (localAnalyserRef.current) {
+              setAudioAnalyser(localAnalyserRef.current);
+            }
+          }
+          if (data.type === "agent-thinking") setStatusTracked("thinking");
         });
 
-        // Daily transcription events
+        // Daily transcription events (paid plan)
         call.on(
           "transcription-message" as Parameters<typeof call.on>[0],
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -176,7 +229,8 @@ export function useTavusRoom() {
 
         // ── Call state ─────────────────────────────────────────────────
         call.on("joined-meeting", async () => {
-          setStatus("listening");
+          setStatusTracked("listening");
+
           // Explicitly start the local microphone so the browser
           // permission prompt is reliably triggered and audio is published.
           try {
@@ -188,19 +242,20 @@ export function useTavusRoom() {
           } catch {
             // startCamera may not be available on all Daily versions; continue
           }
+
           try {
             await call.setLocalAudio(true);
             setMicEnabled(true);
           } catch {
             // Non-fatal; mic state will be updated via participant-updated
           }
-          // Start Daily transcription if available
+
+          // Start Daily transcription if available (paid plan)
           try {
-            // startTranscription is available on paid Daily plans
             (call as unknown as { startTranscription?: (opts: object) => void })
               .startTranscription?.({ language: "en" });
           } catch {
-            // Transcription may not be available on all plans
+            // Transcription not available on free plan — Tavus handles ASR natively
           }
         });
 
@@ -219,7 +274,7 @@ export function useTavusRoom() {
         });
 
         call.on("left-meeting", () => {
-          setStatus("ended");
+          setStatusTracked("ended");
           cleanup();
         });
 
@@ -244,7 +299,7 @@ export function useTavusRoom() {
             return;
           }
           setError(msg);
-          setStatus("error");
+          setStatusTracked("error");
         });
 
         // Daily fires "camera-error" for both camera AND microphone device
@@ -275,10 +330,10 @@ export function useTavusRoom() {
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Failed to join session.";
         setError(msg);
-        setStatus("error");
+        setStatusTracked("error");
       }
     },
-    [addMessage, setupAudioAnalyser]
+    [addMessage, setupAudioAnalyser, setStatusTracked]
   );
 
   const leave = useCallback(async () => {
@@ -288,16 +343,16 @@ export function useTavusRoom() {
       callRef.current = null;
     }
     cleanup();
-    setStatus("ended");
+    setStatusTracked("ended");
     setMicEnabled(false);
     setMicAvailable(false);
-  }, []);
+  }, [setStatusTracked]);
 
   const sendText = useCallback(async (text: string) => {
     if (!text.trim()) return;
 
     addMessage("user", text);
-    setStatus("thinking");
+    setStatusTracked("thinking");
 
     try {
       const convId = conversationId ?? "";
@@ -321,19 +376,27 @@ export function useTavusRoom() {
         }
       }
     } catch {
-      // Show error in chat
       addMessage("agent", "I encountered an issue. Please try again.");
     } finally {
-      setStatus("listening");
+      setStatusTracked("listening");
     }
-  }, [addMessage, conversationId]);
+  }, [addMessage, conversationId, setStatusTracked]);
 
   function cleanup() {
     if (audioCtxRef.current && audioCtxRef.current.state !== "closed") {
       audioCtxRef.current.close().catch(() => {});
     }
+
+    audioElementsRef.current.forEach((audioEl) => {
+      audioEl.pause();
+      audioEl.srcObject = null;
+      audioEl.remove();
+    });
+
+    audioElementsRef.current = [];
     audioCtxRef.current = null;
     analyserRef.current = null;
+    localAnalyserRef.current = null;
     setAudioAnalyser(null);
   }
 
@@ -348,7 +411,6 @@ export function useTavusRoom() {
     }
   }, [micEnabled]);
 
-  // Expose video element ref setter
   const setVideoRef = useCallback((el: HTMLVideoElement | null) => {
     videoElRef.current = el;
   }, []);
