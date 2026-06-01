@@ -8,9 +8,12 @@ interface Props {
   messages: ChatMessage[];
   status: AgentStatus;
   onSend: (text: string) => void;
+  micEnabled: boolean;
+  micAvailable: boolean;
+  onToggleMic: () => void;
 }
 
-export default function ChatPanel({ messages, status, onSend }: Props) {
+export default function ChatPanel({ messages, status, onSend, micEnabled, micAvailable, onToggleMic }: Props) {
   const [input, setInput] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -35,6 +38,21 @@ export default function ChatPanel({ messages, status, onSend }: Props) {
   }
 
   const canInput = status === "listening" || status === "thinking" || status === "speaking";
+  const canToggleMic = canInput && micAvailable;
+
+  // Mic status label
+  let micLabel: string;
+  let micDotClass: string;
+  if (!micAvailable) {
+    micLabel = "MIC UNAVAILABLE - CHECK PERMISSIONS";
+    micDotClass = "bg-cyber-red";
+  } else if (micEnabled) {
+    micLabel = "MIC LIVE";
+    micDotClass = "bg-cyber-green";
+  } else {
+    micLabel = "MIC MUTED";
+    micDotClass = "bg-cyber-red";
+  }
 
   return (
     <div className="flex flex-col bg-cyber-panel border border-cyber-border rounded-sm panel-glow h-full overflow-hidden">
@@ -108,6 +126,46 @@ export default function ChatPanel({ messages, status, onSend }: Props) {
             className="flex-1 bg-transparent text-sm text-cyber-text placeholder:text-cyber-muted/50 
                        font-mono outline-none disabled:cursor-not-allowed"
           />
+          {/* Mic toggle button */}
+          <button
+            onClick={onToggleMic}
+            disabled={!canToggleMic}
+            title={micEnabled ? "Mute microphone" : "Unmute microphone"}
+            className={clsx(
+              "p-1 rounded border transition-all",
+              canToggleMic
+                ? micEnabled
+                  ? "border-cyber-cyan text-cyber-cyan hover:bg-cyber-cyan/10 active:scale-95"
+                  : "border-cyber-red text-cyber-red hover:bg-cyber-red/10 active:scale-95"
+                : "border-cyber-border/40 text-cyber-muted/40 cursor-not-allowed"
+            )}
+          >
+            {micEnabled ? (
+              /* Mic-on icon */
+              <svg viewBox="0 0 24 24" fill="none" className="w-3.5 h-3.5" aria-hidden="true">
+                <rect x="9" y="2" width="6" height="11" rx="3" fill="currentColor" />
+                <path
+                  d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                />
+              </svg>
+            ) : (
+              /* Mic-off icon */
+              <svg viewBox="0 0 24 24" fill="none" className="w-3.5 h-3.5" aria-hidden="true">
+                <rect x="9" y="2" width="6" height="11" rx="3" fill="currentColor" opacity="0.4" />
+                <path
+                  d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  opacity="0.4"
+                />
+                <line x1="4" y1="4" x2="20" y2="20" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            )}
+          </button>
           <button
             onClick={handleSend}
             disabled={!canInput || !input.trim()}
@@ -121,8 +179,11 @@ export default function ChatPanel({ messages, status, onSend }: Props) {
             SEND
           </button>
         </div>
-        <p className="mt-1 text-[9px] font-mono text-cyber-muted/40 text-center">
-          VOICE INPUT ACTIVE · END-TO-END ENCRYPTED
+        <p className="mt-1 text-[9px] font-mono text-cyber-muted/40 text-center flex items-center justify-center gap-1.5">
+          <span className={clsx("inline-block w-1.5 h-1.5 rounded-full", micDotClass)} />
+          {micLabel}
+          {" · "}
+          END-TO-END ENCRYPTED
         </p>
       </div>
     </div>

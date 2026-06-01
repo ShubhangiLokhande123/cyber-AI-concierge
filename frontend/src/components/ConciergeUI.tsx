@@ -10,7 +10,7 @@ import { startConversation } from "@/lib/api";
 import type { AgentStatus } from "@/lib/types";
 
 export default function ConciergeUI() {
-  const { state, join, leave, sendText, setVideoRef } = useTavusRoom();
+  const { state, join, leave, sendText, setVideoRef, toggleMic } = useTavusRoom();
   const [isStarting, setIsStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
 
@@ -101,6 +101,9 @@ export default function ConciergeUI() {
             messages={state.messages}
             status={state.status}
             onSend={sendText}
+            micEnabled={state.micEnabled}
+            micAvailable={state.micAvailable}
+            onToggleMic={toggleMic}
           />
         </div>
       </main>
