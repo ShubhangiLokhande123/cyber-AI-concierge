@@ -135,7 +135,8 @@ export function useTavusRoom() {
         // Daily transcription events
         call.on(
           "transcription-message" as Parameters<typeof call.on>[0],
-          (event: Record<string, unknown>) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (event: any) => {
             const text = (event?.text ?? "") as string;
             const isUser = (event?.participantId as string)?.startsWith("local");
             if (!text) return;
