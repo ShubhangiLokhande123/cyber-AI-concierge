@@ -40,8 +40,9 @@ jobs:
         working-directory: frontend
         env:
           GITHUB_PAGES: "true"
-          # Point the frontend at the deployed Render backend
-          NEXT_PUBLIC_BACKEND_URL: ${{ secrets.NEXT_PUBLIC_BACKEND_URL }}
+          # Point the frontend at the deployed Render backend.
+          # Secret takes precedence; falls back to the public Render hostname.
+          NEXT_PUBLIC_BACKEND_URL: ${{ secrets.NEXT_PUBLIC_BACKEND_URL || 'https://cyber-ai-concierge.onrender.com' }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: npm run build:github
 
