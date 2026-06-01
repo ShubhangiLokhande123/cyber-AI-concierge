@@ -27,4 +27,6 @@ export interface TavusRoomState {
   videoEl: HTMLVideoElement | null;
   audioAnalyser: AnalyserNode | null;
   error: string | null;
+  micEnabled: boolean;
+  micAvailable: boolean;
 }

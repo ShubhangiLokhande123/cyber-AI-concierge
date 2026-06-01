@@ -29,6 +29,8 @@ export function useTavusRoom() {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [audioAnalyser, setAudioAnalyser] = useState<AnalyserNode | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [micEnabled, setMicEnabled] = useState<boolean>(false);
+  const [micAvailable, setMicAvailable] = useState<boolean>(false);
 
   const addMessage = useCallback((role: "agent" | "user", content: string) => {
     setMessages((prev) => [
@@ -66,6 +68,32 @@ export function useTavusRoom() {
       setStatus("connecting");
       setConversationId(convId);
       setError(null);
+      setMicEnabled(false);
+      setMicAvailable(false);
+
+      // ── Preflight mic permission check ─────────────────────────────
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach((t) => t.stop());
+        setMicAvailable(true);
+      } catch (preflightErr) {
+        const name = preflightErr instanceof Error ? preflightErr.name : "";
+        if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+          setError(
+            "Microphone permission denied. Click the lock icon in your browser address bar to allow microphone access, then restart the session."
+          );
+        } else if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+          setError(
+            "No microphone detected. Please connect a microphone and restart the session."
+          );
+        } else {
+          setError(
+            "Could not access microphone. Please check your browser settings and restart the session."
+          );
+        }
+        setStatus("error");
+        return;
+      }
 
       try {
         const Daily = await getDailyJS();
@@ -147,8 +175,25 @@ export function useTavusRoom() {
         );
 
         // ── Call state ─────────────────────────────────────────────────
-        call.on("joined-meeting", () => {
+        call.on("joined-meeting", async () => {
           setStatus("listening");
+          // Explicitly start the local microphone so the browser
+          // permission prompt is reliably triggered and audio is published.
+          try {
+            await (
+              call as unknown as {
+                startCamera: (opts: object) => Promise<void>;
+              }
+            ).startCamera({ startVideoOff: true, startAudioOff: false });
+          } catch {
+            // startCamera may not be available on all Daily versions; continue
+          }
+          try {
+            await call.setLocalAudio(true);
+            setMicEnabled(true);
+          } catch {
+            // Non-fatal; mic state will be updated via participant-updated
+          }
           // Start Daily transcription if available
           try {
             // startTranscription is available on paid Daily plans
@@ -159,14 +204,71 @@ export function useTavusRoom() {
           }
         });
 
+        // ── Local participant mic state ────────────────────────────────
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        call.on("participant-updated", (event: any) => {
+          const p = event?.participant;
+          if (!p?.local) return;
+          const audioState: string | undefined = p?.tracks?.audio?.state;
+          // p.audio is the legacy muted/unmuted flag; audioState covers the
+          // newer Daily track-state API where "playable" means live and
+          // "loading" means the track is being established (treat as live).
+          const audioEnabled: boolean =
+            p?.audio === true || audioState === "playable" || audioState === "loading";
+          setMicEnabled(audioEnabled);
+        });
+
         call.on("left-meeting", () => {
           setStatus("ended");
           cleanup();
         });
 
-        call.on("error", (err: { errorMsg?: string }) => {
-          setError(err?.errorMsg ?? "WebRTC error occurred.");
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        call.on("error", (err: any) => {
+          const msg: string = err?.errorMsg ?? "WebRTC error occurred.";
+          // Detect non-fatal mic permission/device errors
+          if (err?.type === "cam-mic-error" || err?.nonfatal === true) {
+            const errorType: string = err?.error?.type ?? err?.errorMsg ?? "";
+            if (errorType.includes("NotAllowed") || errorType.includes("PermissionDenied")) {
+              setError(
+                "Microphone permission denied. Click the lock icon in your browser address bar to allow microphone access, then restart the session."
+              );
+              setMicAvailable(false);
+            } else if (errorType.includes("NotFound") || errorType.includes("DevicesNotFound")) {
+              setError(
+                "No microphone detected. Please connect a microphone and restart the session."
+              );
+              setMicAvailable(false);
+            }
+            // Non-fatal: don't change session status
+            return;
+          }
+          setError(msg);
           setStatus("error");
+        });
+
+        // Daily fires "camera-error" for both camera AND microphone device
+        // errors (despite the name). It is the correct event to catch
+        // NotAllowedError / NotFoundError for audio-only call objects.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        call.on("camera-error" as Parameters<typeof call.on>[0], (err: any) => {
+          const errorType: string =
+            err?.error?.type ?? err?.error?.name ?? err?.errorMsg ?? "";
+          if (errorType.includes("NotAllowed") || errorType.includes("PermissionDenied")) {
+            setError(
+              "Microphone permission denied. Click the lock icon in your browser address bar to allow microphone access, then restart the session."
+            );
+          } else if (errorType.includes("NotFound") || errorType.includes("DevicesNotFound")) {
+            setError(
+              "No microphone detected. Please connect a microphone and restart the session."
+            );
+          } else {
+            setError(
+              "Could not access microphone. Please check your browser settings and restart the session."
+            );
+          }
+          setMicAvailable(false);
+          setMicEnabled(false);
         });
 
         await call.join({ url: conversationUrl });
@@ -187,6 +289,8 @@ export function useTavusRoom() {
     }
     cleanup();
     setStatus("ended");
+    setMicEnabled(false);
+    setMicAvailable(false);
   }, []);
 
   const sendText = useCallback(async (text: string) => {
@@ -233,6 +337,17 @@ export function useTavusRoom() {
     setAudioAnalyser(null);
   }
 
+  const toggleMic = useCallback(async () => {
+    if (!callRef.current) return;
+    const next = !micEnabled;
+    try {
+      await callRef.current.setLocalAudio(next);
+      setMicEnabled(next);
+    } catch {
+      // State will be reconciled via participant-updated event
+    }
+  }, [micEnabled]);
+
   // Expose video element ref setter
   const setVideoRef = useCallback((el: HTMLVideoElement | null) => {
     videoElRef.current = el;
@@ -253,7 +368,9 @@ export function useTavusRoom() {
     videoEl: videoElRef.current,
     audioAnalyser,
     error,
+    micEnabled,
+    micAvailable,
   };
 
-  return { state, join, leave, sendText, setVideoRef };
+  return { state, join, leave, sendText, setVideoRef, toggleMic };
 }

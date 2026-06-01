@@ -214,3 +214,22 @@ Cyber Security AI/
 - Webhook endpoint validates Tavus event types before processing
 - No user data is stored or logged beyond the active session
 - `.gitignore` should include `.env`, `.env.local`
+
+---
+
+## Troubleshooting
+
+### Voice input not working
+
+The browser **requires HTTPS** (or `localhost`) to access the microphone via WebRTC. If you are running the app on a non-secure HTTP origin other than localhost, the microphone API will be blocked.
+
+Common causes and fixes:
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| No permission prompt appears | Page served over plain HTTP on a non-localhost domain | Use `https://` or run locally via `localhost` |
+| "Microphone permission denied" banner | User blocked mic in browser | Click the 🔒 lock icon in the address bar → reset microphone permission → restart the session |
+| "No microphone detected" banner | No audio input device connected | Plug in or enable a microphone, then restart the session |
+| MIC MUTED indicator after joining | Mic muted by default or blocked | Click the mic toggle button (🎤) in the chat panel to unmute |
+
+> **Note:** On first session start the browser will show a permission prompt asking for microphone access. Grant the permission and the avatar will be able to hear you.
