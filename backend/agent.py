@@ -10,7 +10,7 @@ from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
-from tools import cisa_kev_search, nvd_cve_search, cyber_web_search, mitre_attack_lookup
+from tools import cisa_kev_search, nvd_cve_search, cyber_web_search, cyber_news_search, mitre_attack_lookup
 
 log = logging.getLogger("cyberguard")
 
@@ -29,6 +29,17 @@ to threat intelligence feeds and vulnerability databases.
   NIST CSF 2.0, Zero Trust Architecture, SASE, quantum-safe cryptography
 - **Compliance & Governance** — NIST, ISO 27001, SOC 2, GDPR, SEC cyber disclosure rules
 
+## Tool Usage — MANDATORY
+- **ALWAYS call a tool first** before answering any question about recent events, news, \
+  trends, vulnerabilities, or anything that could have changed recently.
+- For "latest news", "current events", "recent breaches", "trends", "what's happening" \
+  → call **cyber_news_search** first.
+- For specific CVEs or vulnerability details → call **nvd_cve_search** or **cisa_kev_search**.
+- For threat actor TTPs or attack techniques → call **mitre_attack_lookup**.
+- For deep-dive research or broad cybersecurity topics → call **cyber_web_search**.
+- NEVER say you cannot access the internet or real-time data — you have live search tools.
+- NEVER answer news/trends questions from training knowledge alone — always fetch live data.
+
 ## Behavioral Guidelines
 - Always **fetch live data** when asked about recent threats, CVEs, or breaches — use your tools.
 - Provide **CVE IDs and CVSS scores** when discussing specific vulnerabilities.
@@ -39,16 +50,20 @@ to threat intelligence feeds and vulnerability databases.
 - For AI security topics, emphasize **practical exploitation scenarios** (prompt injection, \
   jailbreaks, training data poisoning, model theft).
 - When citing sources, mention the originating feed (CISA, NVD, MITRE, news outlet).
-- If uncertain, say so and offer to search for the latest information.
+- If uncertain, search for the latest information using your tools — never guess.
 
 You speak with the confidence of a seasoned CISO briefing the board — authoritative, \
 clear, and action-oriented."""
 
 
-def build_agent() -> AgentExecutor:
+FALLBACK_MODEL = "llama-3.1-8b-instant"
+
+
+def build_agent(model: str | None = None) -> AgentExecutor:
     # llama-3.3-70b-versatile: best quality on Groq free tier
     # fallback: llama-3.1-8b-instant (higher rate limits)
-    model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    if model is None:
+        model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
     llm = ChatGroq(
         model=model,
@@ -57,7 +72,7 @@ def build_agent() -> AgentExecutor:
     )
     log.info("Using Groq model: %s", model)
 
-    tools = [cisa_kev_search, nvd_cve_search, cyber_web_search, mitre_attack_lookup]
+    tools = [cisa_kev_search, nvd_cve_search, cyber_web_search, cyber_news_search, mitre_attack_lookup]
 
     prompt = ChatPromptTemplate.from_messages(
         [

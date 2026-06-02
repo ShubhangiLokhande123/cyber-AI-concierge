@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-from agent import build_agent, openai_messages_to_history
+from agent import build_agent, openai_messages_to_history, FALLBACK_MODEL
 
 # ── Bootstrap ──────────────────────────────────────────────────────────────
 load_dotenv()
@@ -29,8 +29,17 @@ log = logging.getLogger("cyberguard")
 TAVUS_API_KEY: str = os.getenv("TAVUS_API_KEY", "")
 TAVUS_REPLICA_ID: str = os.getenv("TAVUS_REPLICA_ID", "r79e1c033f")
 TAVUS_PERSONA_ID: str = os.getenv("TAVUS_PERSONA_ID", "")
-WEBHOOK_BASE_URL: str = os.getenv("WEBHOOK_BASE_URL", "").rstrip("/")
 FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+# Resolve webhook base URL — prefer explicit env var, then Render's auto-injected URL,
+# then fall back to empty string (webhook disabled).
+_raw_webhook = os.getenv("WEBHOOK_BASE_URL", "").rstrip("/")
+_placeholder = "your-ngrok-subdomain"
+if not _raw_webhook or _placeholder in _raw_webhook:
+    # Render injects RENDER_EXTERNAL_URL automatically for every web service
+    _render_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+    _raw_webhook = _render_url
+WEBHOOK_BASE_URL: str = _raw_webhook
 
 TAVUS_API_BASE = "https://tavusapi.com"
 TAVUS_HEADERS = {
@@ -55,12 +64,13 @@ CONVERSATIONAL_CONTEXT = (
 )
 
 
-# ── Agent (lazy singleton – works in server and serverless alike) ─────────
+# ── Agent (lazy singletons – works in server and serverless alike) ────────
 _agent_executor = None
+_fallback_agent_executor = None
 
 
 def _get_agent():
-    """Return the agent executor, building it on first call (serverless-safe)."""
+    """Return the primary agent executor, building it on first call."""
     global _agent_executor  # noqa: PLW0603
     if _agent_executor is None:
         log.info("Building LangChain agent…")
@@ -69,8 +79,30 @@ def _get_agent():
     return _agent_executor
 
 
+def _get_fallback_agent():
+    """Return the fallback agent (higher-rate-limit model), building it on first call."""
+    global _fallback_agent_executor  # noqa: PLW0603
+    if _fallback_agent_executor is None:
+        log.info("Building fallback LangChain agent (%s)…", FALLBACK_MODEL)
+        _fallback_agent_executor = build_agent(model=FALLBACK_MODEL)
+        log.info("Fallback agent ready.")
+    return _fallback_agent_executor
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    err_str = str(exc)
+    return (
+        "429" in err_str
+        or "rate_limit" in err_str.lower()
+        or "RESOURCE_EXHAUSTED" in err_str
+        or "quota" in err_str.lower()
+        or "rate limit" in err_str.lower()
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    log.info("Webhook base URL: %s", WEBHOOK_BASE_URL or "(not configured — Tavus built-in LLM)")
     _get_agent()  # Pre-warm in traditional server mode
     yield
 
@@ -83,6 +115,7 @@ _vercel_url = os.getenv("VERCEL_URL", "")
 _allowed_origins = [
     FRONTEND_URL,
     "http://localhost:3000",
+    "http://localhost:3001",
     "https://shubhangilokhande123.github.io",
 ]
 if _vercel_url:
@@ -118,9 +151,8 @@ async def start_conversation(body: StartConversationRequest):
     if not TAVUS_API_KEY:
         raise HTTPException(status_code=500, detail="TAVUS_API_KEY is not configured.")
 
-    # Only use the webhook if WEBHOOK_BASE_URL is set and not still the placeholder
-    _placeholder = "your-ngrok-subdomain"
-    use_webhook = bool(WEBHOOK_BASE_URL) and _placeholder not in WEBHOOK_BASE_URL
+    # Only use the webhook if WEBHOOK_BASE_URL resolved to a real URL
+    use_webhook = bool(WEBHOOK_BASE_URL)
 
     payload = {
         "replica_id": TAVUS_REPLICA_ID,
@@ -170,9 +202,11 @@ async def send_message(body: SendMessageRequest):
         return {"response": "Please provide a message.", "conversation_id": body.conversation_id}
 
     log.info("Text message: %s…", text[:80])
+    import asyncio
 
+    # ── Attempt 1 & 2: primary model with brief back-off ──────────────────
     last_exc: Exception | None = None
-    for attempt in range(3):
+    for attempt in range(2):
         try:
             result = _get_agent().invoke({"input": text, "chat_history": []})
             reply: str = result.get("output", "I could not generate a response. Please try again.")
@@ -180,18 +214,26 @@ async def send_message(body: SendMessageRequest):
             return {"response": reply, "conversation_id": body.conversation_id}
         except Exception as exc:
             last_exc = exc
-            err_str = str(exc)
-            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
-                wait = 2 ** attempt  # 1s, 2s, 4s
-                log.warning("Rate limit hit (attempt %d/3), retrying in %ds…", attempt + 1, wait)
-                import asyncio
+            if _is_rate_limit_error(exc):
+                wait = 2 ** attempt  # 1s, 2s
+                log.warning("Primary model rate-limited (attempt %d/2), waiting %ds…", attempt + 1, wait)
                 await asyncio.sleep(wait)
             else:
-                break  # Non-retryable error
+                break  # Non-retryable — skip straight to fallback
 
-    log.exception("Agent error on text message: %s", last_exc)
+    # ── Attempt 3: fallback to higher-rate-limit model ─────────────────────
+    try:
+        log.warning("Switching to fallback model %s…", FALLBACK_MODEL)
+        result = _get_fallback_agent().invoke({"input": text, "chat_history": []})
+        reply = result.get("output", "I could not generate a response. Please try again.")
+        log.info("Fallback reply (%d chars): %s…", len(reply), reply[:80])
+        return {"response": reply, "conversation_id": body.conversation_id}
+    except Exception as exc:
+        last_exc = exc
+        log.exception("Fallback agent also failed: %s", exc)
+
     return {
-        "response": "I'm temporarily rate-limited by the AI provider. Please wait a moment and try again.",
+        "response": "I'm having trouble reaching my intelligence feeds right now. Please try again in a moment.",
         "conversation_id": body.conversation_id,
     }
 
@@ -244,18 +286,27 @@ async def tavus_webhook(request: Request):
     if not user_input:
         return _openai_response("Please go ahead — I'm listening.")
 
-    # ── Run agent ──────────────────────────────────────────────────────────
-    try:
-        result = _get_agent().invoke(
-            {"input": user_input, "chat_history": history}
-        )
-        reply: str = result.get("output", "I could not generate a response. Please try again.")
-    except Exception as exc:  # noqa: BLE001
-        log.exception("Agent error: %s", exc)
-        reply = (
-            "I encountered an issue retrieving that information. "
-            "Please rephrase your question or try again in a moment."
-        )
+    # ── Run agent with fallback on rate-limit ─────────────────────────────
+    import asyncio
+    reply: str = ""
+    for agent_fn, label in [(_get_agent, "primary"), (_get_fallback_agent, FALLBACK_MODEL)]:
+        try:
+            result = agent_fn().invoke({"input": user_input, "chat_history": history})
+            reply = result.get("output", "")
+            break
+        except Exception as exc:  # noqa: BLE001
+            if _is_rate_limit_error(exc) and label == "primary":
+                log.warning("Webhook: primary model rate-limited, switching to fallback…")
+                await asyncio.sleep(1)
+                continue
+            log.exception("Agent error (%s): %s", label, exc)
+            reply = (
+                "I encountered an issue retrieving that information. "
+                "Please rephrase your question or try again in a moment."
+            )
+            break
+    if not reply:
+        reply = "I could not generate a response. Please try again."
 
     log.info("Agent reply (%d chars): %s…", len(reply), reply[:80])
 

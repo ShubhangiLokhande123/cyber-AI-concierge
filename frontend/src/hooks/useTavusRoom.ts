@@ -231,18 +231,8 @@ export function useTavusRoom() {
         call.on("joined-meeting", async () => {
           setStatusTracked("listening");
 
-          // Explicitly start the local microphone so the browser
-          // permission prompt is reliably triggered and audio is published.
-          try {
-            await (
-              call as unknown as {
-                startCamera: (opts: object) => Promise<void>;
-              }
-            ).startCamera({ startVideoOff: true, startAudioOff: false });
-          } catch {
-            // startCamera may not be available on all Daily versions; continue
-          }
-
+          // Enable local audio after joining (setLocalAudio is the correct
+          // Daily.co API once inside a meeting — startCamera() is pre-join only).
           try {
             await call.setLocalAudio(true);
             setMicEnabled(true);
